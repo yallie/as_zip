@@ -1,0 +1,226 @@
+create or replace package as_zip
+is
+  type file_list is table of clob;
+--
+  function get_file_list( p_dir in varchar2, p_zip_file in varchar2 )
+  return file_list;
+--
+  function get_file_list( p_zipped_blob in blob )
+  return file_list;
+--
+  function get_file
+    ( p_dir in varchar2
+    , p_zip_file in varchar2
+    , p_file_name in varchar2
+    )
+  return blob;
+--
+  function get_file( p_zipped_blob in blob, p_file_name in varchar2 )
+  return blob;
+--
+end;
+/
+create or replace package body as_zip
+is
+--
+  function raw2num( p_value in raw )
+  return number
+  is
+  begin -- note: FFFFFFFF => -1
+    return utl_raw.cast_to_binary_integer( p_value, utl_raw.little_endian );
+  end;
+--
+  function file2blob( p_dir in varchar2, p_file_name in varchar2 )
+  return blob
+  is
+    file_lob bfile;
+    file_blob blob;
+  begin
+    file_lob := bfilename( p_dir, p_file_name );
+    dbms_lob.open( file_lob, dbms_lob.file_readonly );
+    dbms_lob.createtemporary( file_blob, true );
+    dbms_lob.loadfromfile( file_blob, file_lob, dbms_lob.lobmaxsize );
+    dbms_lob.close( file_lob ); 
+    return file_blob;
+  exception
+    when others then
+      if dbms_lob.isopen( file_lob ) = 1
+      then
+    dbms_lob.close( file_lob ); 
+      end if;
+      if dbms_lob.istemporary( file_blob ) = 1
+      then
+        dbms_lob.freetemporary( file_blob );
+      end if;
+      raise;
+  end;
+--
+  function get_file_list( p_dir in varchar2, p_zip_file in varchar2 )
+  return file_list
+  is
+  begin
+    return get_file_list( file2blob( p_dir, p_zip_file ) );
+  end;
+--
+  function get_file_list( p_zipped_blob in blob )
+  return file_list
+  is
+    t_ind integer;
+    t_hd_ind integer;
+    t_rv file_list;
+  begin
+    t_ind := dbms_lob.getlength( p_zipped_blob ) - 21;
+    loop
+      exit when dbms_lob.substr( p_zipped_blob, 4, t_ind ) = hextoraw( '504B0506' ) or t_ind < 1;
+      t_ind := t_ind - 1;
+    end loop;
+--
+    if t_ind <= 0
+    then
+      return null;
+    end if;
+--
+    t_hd_ind := raw2num( dbms_lob.substr( p_zipped_blob, 4, t_ind + 16 ) ) + 1;
+    t_rv := file_list();
+    t_rv.extend( raw2num( dbms_lob.substr( p_zipped_blob, 2, t_ind + 10 ) ) );
+    for i in 1 .. raw2num( dbms_lob.substr( p_zipped_blob, 2, t_ind + 8 ) )
+    loop
+      t_rv( i ) := utl_raw.cast_to_varchar2
+                     ( dbms_lob.substr( p_zipped_blob
+                                        , raw2num( dbms_lob.substr( p_zipped_blob
+                                                                    , 2
+                                                                    , t_hd_ind + 28
+                                                                    )
+                                                 )
+                                        , t_hd_ind + 46
+                                        )
+                     );
+      t_hd_ind := t_hd_ind + 46
+                + raw2num( dbms_lob.substr( p_zipped_blob, 2, t_hd_ind + 28 ) )
+                + raw2num( dbms_lob.substr( p_zipped_blob, 2, t_hd_ind + 30 ) )  
+                + raw2num( dbms_lob.substr( p_zipped_blob, 2, t_hd_ind + 32 ) );  
+    end loop;
+--
+    return t_rv;
+  end;
+--
+  function get_file
+    ( p_dir in varchar2
+    , p_zip_file in varchar2
+    , p_file_name in varchar2
+    )
+  return blob
+  is
+  begin
+    return get_file( file2blob( p_dir, p_zip_file ), p_file_name );
+  end;
+--
+  function get_file( p_zipped_blob in blob, p_file_name in varchar2 )
+  return blob
+  is
+    t_tmp blob;
+    t_ind integer;
+    t_hd_ind integer;
+    t_fl_ind integer;
+  begin
+    t_ind := dbms_lob.getlength( p_zipped_blob ) - 21;
+    loop
+      exit when dbms_lob.substr( p_zipped_blob, 4, t_ind ) = hextoraw( '504B0506' ) or t_ind < 1;
+      t_ind := t_ind - 1;
+    end loop;
+--
+    if t_ind <= 0
+    then
+      return null;
+    end if;
+--
+    t_hd_ind := raw2num( dbms_lob.substr( p_zipped_blob, 4, t_ind + 16 ) ) + 1;
+    for i in 1 .. raw2num( dbms_lob.substr( p_zipped_blob, 2, t_ind + 8 ) )
+    loop
+      if p_file_name = utl_raw.cast_to_varchar2
+                         ( dbms_lob.substr( p_zipped_blob
+                                            , raw2num( dbms_lob.substr( p_zipped_blob, 2, t_hd_ind + 28 ) )
+                                            , t_hd_ind + 46
+                                            )
+                         )
+      then
+        if dbms_lob.substr( p_zipped_blob, 2, t_hd_ind + 10 ) = hextoraw( '0800' ) -- deflate
+        then
+          t_fl_ind := raw2num( dbms_lob.substr( p_zipped_blob, 4, t_hd_ind + 42 ) );
+          t_tmp := hextoraw( '1F8B0800000000000003' ); -- gzip header
+          dbms_lob.append( t_tmp
+                         , dbms_lob.substr( p_zipped_blob
+                                            , raw2num( dbms_lob.substr( p_zipped_blob, 4, t_fl_ind + 19 ) )
+                                            , t_fl_ind + 31 
+                                            + raw2num( dbms_lob.substr( p_zipped_blob, 2, t_fl_ind + 27 ) )
+                                            + raw2num( dbms_lob.substr( p_zipped_blob, 2, t_fl_ind + 29 ) ) 
+                                            )
+                         );
+          dbms_lob.append( t_tmp, dbms_lob.substr( p_zipped_blob, 4, t_fl_ind + 15 ) );
+          dbms_lob.append( t_tmp, hextoraw( '00000000' ) );
+          return utl_compress.lz_uncompress( t_tmp );
+        end if;
+--
+        if dbms_lob.substr( p_zipped_blob, 2, t_hd_ind + 10 ) = hextoraw( '0000' ) -- The file is stored (no compression)
+        then
+          t_fl_ind := raw2num( dbms_lob.substr( p_zipped_blob, 4, t_hd_ind + 42 ) );
+          return dbms_lob.substr( p_zipped_blob
+                                  , raw2num( dbms_lob.substr( p_zipped_blob, 4, t_fl_ind + 19 ) )
+                                  , t_fl_ind + 31 
+                                  + raw2num( dbms_lob.substr( p_zipped_blob, 2, t_fl_ind + 27 ) )
+                                  + raw2num( dbms_lob.substr( p_zipped_blob, 2, t_fl_ind + 29 ) ) 
+                                  );
+        end if;
+      end if;
+      t_hd_ind := t_hd_ind + 46
+                + raw2num( dbms_lob.substr( p_zipped_blob, 2, t_hd_ind + 28 ) )
+                + raw2num( dbms_lob.substr( p_zipped_blob, 2, t_hd_ind + 30 ) )  
+                + raw2num( dbms_lob.substr( p_zipped_blob, 2, t_hd_ind + 32 ) );  
+    end loop;
+--
+    return null;
+  end;
+end;
+/
+
+
+declare
+  fl as_zip.file_list;
+begin
+  fl := as_zip.get_file_list( 'MY_DIR', 'xxx.zip' );
+  if fl.count() > 0
+  then
+    for i in fl.first .. fl.last
+    loop
+      dbms_output.put_line( fl( i ) );
+    end loop;
+  end if;
+end;
+/
+
+
+declare
+  fl as_zip.file_list;
+  x blob;
+begin
+  fl := as_zip.get_file_list( 'MY_DIR', 'xxx.zip' );
+  if fl.count() > 0
+  then
+    for i in fl.first .. fl.last
+    loop
+      dbms_output.put( fl( i ) );
+       x := as_zip.GET_FILE( 'MY_DIR', 'xxx.zip', fl( i ) );
+      dbms_output.put_line( ' ' || nvl( dbms_lob.getlength( x ), -1 ) );
+    end loop;
+  end if;
+end;
+/
+
+select extractvalue( column_value, '*/text()' )
+from table( xmlsequence( xmltype( as_zip.get_file( 'MY_DIR', 'demo.docx', 'word/document.xml' )
+                                , nls_charset_id( 'UTF8' )
+                                )
+                                .extract( 'w:document/w:body/w:p/w:r/w:t', 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"' )
+                      )
+          )
+/
