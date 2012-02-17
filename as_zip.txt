@@ -7,6 +7,8 @@ is
 ** Website: http://technology.amis.nl/blog
 **
 ** Changelog:
+**   Date: 17-02-2012
+**     Added more support for non-ascii filenames
 **   Date: 25-01-2012
 **     Added MIT-license
 **     Some minor improvements
@@ -89,10 +91,15 @@ THE SOFTWARE.
 declare
   g_zipped_blob blob;
 begin
-  as_zip.add1file( g_zipped_blob, 'test1.txt', utl_raw.cast_to_raw( 'Dit is de laatste test! Waarom wordt dit dan niet gecomprimeerd?' ) );
-  as_zip.add1file( g_zipped_blob, 'test1234.txt', utl_raw.cast_to_raw( 'En hier staat wat anders' ) );
+  as_zip.add1file( g_zipped_blob, 'test4.txt', null ); -- a empty file
+  as_zip.add1file( g_zipped_blob, 'dir1/test1.txt', utl_raw.cast_to_raw( q'<A file with some more text, stored in a subfolder which isn't added>' ) );
+  as_zip.add1file( g_zipped_blob, 'test1234.txt', utl_raw.cast_to_raw( 'A small file' ) );
+  as_zip.add1file( g_zipped_blob, 'dir2/', null ); -- a folder
+  as_zip.add1file( g_zipped_blob, 'dir3/', null ); -- a folder
+  as_zip.add1file( g_zipped_blob, 'dir3/test2.txt', utl_raw.cast_to_raw( 'A small filein a previous created folder' ) );
   as_zip.finish_zip( g_zipped_blob );
   as_zip.save_zip( g_zipped_blob, 'MY_DIR', 'my.zip' );
+  dbms_lob.freetemporary( g_zipped_blob );
 end;
 --
 declare
@@ -108,10 +115,11 @@ end;
 */
 end;
 /
-
-
 CREATE OR REPLACE package body as_zip
 is
+--
+  c_LOCAL_FILE_HEADER       constant raw(4) := hextoraw( '504B0304' ); -- Local file header signature
+  c_END_OF_CENTAL_DIRECTORY constant raw(4) := hextoraw( '504B0506' ); -- End of central directory signature
 --
   function blob2num( p_blob blob, p_len integer, p_pos integer )
   return number
@@ -124,9 +132,9 @@ is
   return varchar2
   is
   begin
-    return nvl( utl_i18n.raw_to_char( p_raw, p_encoding )
-              , utl_i18n.raw_to_char( p_raw, utl_i18n.map_charset( p_encoding, utl_i18n.GENERIC_CONTEXT, utl_i18n.IANA_TO_ORACLE ) )
-              );
+    return coalesce( utl_i18n.raw_to_char( p_raw, p_encoding )
+                   , utl_i18n.raw_to_char( p_raw, utl_i18n.map_charset( p_encoding, utl_i18n.GENERIC_CONTEXT, utl_i18n.IANA_TO_ORACLE ) )
+                   );
   end;
 --
   function file2blob
@@ -177,10 +185,11 @@ is
     t_ind integer;
     t_hd_ind integer;
     t_rv file_list;
+    t_encoding varchar2(32767);
   begin
     t_ind := dbms_lob.getlength( p_zipped_blob ) - 21;
     loop
-      exit when dbms_lob.substr( p_zipped_blob, 4, t_ind ) = hextoraw( '504B0506' ) or t_ind < 1;
+      exit when t_ind < 1 or dbms_lob.substr( p_zipped_blob, 4, t_ind ) = c_END_OF_CENTAL_DIRECTORY;
       t_ind := t_ind - 1;
     end loop;
 --
@@ -194,17 +203,28 @@ is
     t_rv.extend( blob2num( p_zipped_blob, 2, t_ind + 10 ) );
     for i in 1 .. blob2num( p_zipped_blob, 2, t_ind + 8 )
     loop
+      if p_encoding is null
+      then
+        if utl_raw.bit_and( dbms_lob.substr( p_zipped_blob, 1, t_hd_ind + 9 ), hextoraw( '08' ) ) = hextoraw( '08' )
+        then  
+          t_encoding := 'AL32UTF8'; -- utf8
+        else
+          t_encoding := 'US8PC437'; -- IBM codepage 437
+        end if;
+      else
+        t_encoding := p_encoding;
+      end if;
       t_rv( i ) := raw2varchar2
                      ( dbms_lob.substr( p_zipped_blob
                                       , blob2num( p_zipped_blob, 2, t_hd_ind + 28 )
                                       , t_hd_ind + 46
                                       )
-                     , p_encoding
+                     , t_encoding
                      );
       t_hd_ind := t_hd_ind + 46
-                + blob2num( p_zipped_blob, 2, t_hd_ind + 28 )
-                + blob2num( p_zipped_blob, 2, t_hd_ind + 30 )
-                + blob2num( p_zipped_blob, 2, t_hd_ind + 32 );
+                + blob2num( p_zipped_blob, 2, t_hd_ind + 28 )  -- File name length
+                + blob2num( p_zipped_blob, 2, t_hd_ind + 30 )  -- Extra field length
+                + blob2num( p_zipped_blob, 2, t_hd_ind + 32 ); -- File comment length
     end loop;
 --
     return t_rv;
@@ -233,10 +253,11 @@ is
     t_ind integer;
     t_hd_ind integer;
     t_fl_ind integer;
+    t_encoding varchar2(32767);
   begin
     t_ind := dbms_lob.getlength( p_zipped_blob ) - 21;
     loop
-      exit when dbms_lob.substr( p_zipped_blob, 4, t_ind ) = hextoraw( '504B0506' ) or t_ind < 1;
+      exit when t_ind < 1 or dbms_lob.substr( p_zipped_blob, 4, t_ind ) = c_END_OF_CENTAL_DIRECTORY;
       t_ind := t_ind - 1;
     end loop;
 --
@@ -248,17 +269,28 @@ is
     t_hd_ind := blob2num( p_zipped_blob, 4, t_ind + 16 ) + 1;
     for i in 1 .. blob2num( p_zipped_blob, 2, t_ind + 8 )
     loop
+      if p_encoding is null
+      then
+        if utl_raw.bit_and( dbms_lob.substr( p_zipped_blob, 1, t_hd_ind + 9 ), hextoraw( '08' ) ) = hextoraw( '08' )
+        then  
+          t_encoding := 'AL32UTF8'; -- utf8
+        else
+          t_encoding := 'US8PC437'; -- IBM codepage 437
+        end if;
+      else
+        t_encoding := p_encoding;
+      end if;
       if p_file_name = raw2varchar2
                          ( dbms_lob.substr( p_zipped_blob
                                           , blob2num( p_zipped_blob, 2, t_hd_ind + 28 )
                                           , t_hd_ind + 46
                                           )
-                         , p_encoding
+                         , t_encoding
                          )
       then
         if blob2num( p_zipped_blob, 4, t_hd_ind + 24 ) = 0 -- uncompressed length
         then
-          if substr( p_file_name, -1 ) = '/'
+          if substr( p_file_name, -1 ) in ( '/', '\' )
           then  -- directory/folder
             return null;
           else -- empty file
@@ -275,11 +307,13 @@ is
                        , blob2num( p_zipped_blob, 4, t_fl_ind + 19 )
                        , 11
                        , t_fl_ind + 31
-                       + blob2num( p_zipped_blob, 2, t_fl_ind + 27 )
-                       + blob2num( p_zipped_blob, 2, t_fl_ind + 29 )
+                       + blob2num( p_zipped_blob, 2, t_fl_ind + 27 ) -- File name length
+                       + blob2num( p_zipped_blob, 2, t_fl_ind + 29 ) -- Extra field length
                        );
-          dbms_lob.append( t_tmp, dbms_lob.substr( p_zipped_blob, 4, t_fl_ind + 15 ) );
-          dbms_lob.append( t_tmp, dbms_lob.substr( p_zipped_blob, 4, t_fl_ind + 23 ) );
+          dbms_lob.append( t_tmp, utl_raw.concat( dbms_lob.substr( p_zipped_blob, 4, t_fl_ind + 15 ) -- CRC32
+                                                , dbms_lob.substr( p_zipped_blob, 4, t_fl_ind + 23 ) -- uncompressed length
+                                                )
+                         );
           return utl_compress.lz_uncompress( t_tmp );
         end if;
 --
@@ -289,15 +323,15 @@ is
           return dbms_lob.substr( p_zipped_blob
                                 , blob2num( p_zipped_blob, 4, t_fl_ind + 19 )
                                 , t_fl_ind + 31
-                                + blob2num( p_zipped_blob, 2, t_fl_ind + 27 )
-                                + blob2num( p_zipped_blob, 2, t_fl_ind + 29 )
+                                + blob2num( p_zipped_blob, 2, t_fl_ind + 27 ) -- File name length
+                                + blob2num( p_zipped_blob, 2, t_fl_ind + 29 ) -- Extra field length
                                 );
         end if;
       end if;
       t_hd_ind := t_hd_ind + 46
-                + blob2num( p_zipped_blob, 2, t_hd_ind + 28 )
-                + blob2num( p_zipped_blob, 2, t_hd_ind + 30 )
-                + blob2num( p_zipped_blob, 2, t_hd_ind + 32 );
+                + blob2num( p_zipped_blob, 2, t_hd_ind + 28 )  -- File name length
+                + blob2num( p_zipped_blob, 2, t_hd_ind + 30 )  -- Extra field length
+                + blob2num( p_zipped_blob, 2, t_hd_ind + 32 ); -- File comment length
     end loop;
 --
     return null;
@@ -318,20 +352,42 @@ is
   is
     t_now date;
     t_blob blob;
+    t_len integer;
     t_clen integer;
+    t_crc32 raw(4) := hextoraw( '00000000' );
+    t_compressed boolean := false;
+    t_name raw(32767);
   begin
     t_now := sysdate;
-    t_blob := utl_compress.lz_compress( p_content );
-    t_clen := dbms_lob.getlength( t_blob );
+    t_len := nvl( dbms_lob.getlength( p_content ), 0 );
+    if t_len > 0
+    then 
+      t_blob := utl_compress.lz_compress( p_content );
+      t_clen := dbms_lob.getlength( t_blob ) - 18;
+      t_compressed := t_clen < t_len;
+      t_crc32 := dbms_lob.substr( t_blob, 4, t_clen + 11 );       
+    end if;
+    if not t_compressed
+    then 
+      t_clen := t_len;
+      t_blob := p_content;
+    end if;
     if p_zipped_blob is null
     then
       dbms_lob.createtemporary( p_zipped_blob, true );
     end if;
+    t_name := utl_i18n.string_to_raw( p_name, 'AL32UTF8' );
     dbms_lob.append( p_zipped_blob
-                   , utl_raw.concat( hextoraw( '504B0304' ) -- Local file header signature
-                                   , hextoraw( '1400' )     -- version 2.0
-                                   , hextoraw( '0000' )     -- no General purpose bits
-                                   , hextoraw( '0800' )     -- deflate
+                   , utl_raw.concat( c_LOCAL_FILE_HEADER -- Local file header signature
+                                   , hextoraw( '1400' )  -- version 2.0
+                                   , case when t_name = utl_i18n.string_to_raw( p_name, 'US8PC437' )
+                                       then hextoraw( '0000' ) -- no General purpose bits
+                                       else hextoraw( '0008' ) -- set Language encoding flag (EFS)
+                                     end 
+                                   , case when t_compressed
+                                        then hextoraw( '0800' ) -- deflate
+                                        else hextoraw( '0000' ) -- stored
+                                     end
                                    , little_endian( to_number( to_char( t_now, 'ss' ) ) / 2
                                                   + to_number( to_char( t_now, 'mi' ) ) * 32
                                                   + to_number( to_char( t_now, 'hh24' ) ) * 2048
@@ -342,16 +398,25 @@ is
                                                   + ( to_number( to_char( t_now, 'yyyy' ) ) - 1980 ) * 512
                                                   , 2
                                                   ) -- File last modification date
-                                   , dbms_lob.substr( t_blob, 4, t_clen - 7 )         -- CRC-32
-                                   , little_endian( t_clen - 18 )                     -- compressed size
-                                   , little_endian( dbms_lob.getlength( p_content ) ) -- uncompressed size
-                                   , little_endian( length( p_name ), 2 )             -- File name length
-                                   , hextoraw( '0000' )                               -- Extra field length
-                                   , utl_raw.cast_to_raw( p_name )                    -- File name
+                                   , t_crc32 -- CRC-32
+                                   , little_endian( t_clen )                      -- compressed size
+                                   , little_endian( t_len )                       -- uncompressed size
+                                   , little_endian( utl_raw.length( t_name ), 2 ) -- File name length
+                                   , hextoraw( '0000' )                           -- Extra field length
+                                   , t_name                                       -- File name
                                    )
                    );
-    dbms_lob.copy( p_zipped_blob, t_blob, t_clen - 18, dbms_lob.getlength( p_zipped_blob ) + 1, 11 ); -- compressed content
-    dbms_lob.freetemporary( t_blob );
+    if t_compressed
+    then                   
+      dbms_lob.copy( p_zipped_blob, t_blob, t_clen, dbms_lob.getlength( p_zipped_blob ) + 1, 11 ); -- compressed content
+    elsif t_clen > 0
+    then                   
+      dbms_lob.copy( p_zipped_blob, t_blob, t_clen, dbms_lob.getlength( p_zipped_blob ) + 1, 1 ); --  content
+    end if;
+    if dbms_lob.istemporary( t_blob ) = 1
+    then      
+      dbms_lob.freetemporary( t_blob );
+    end if;
   end;
 --
   procedure finish_zip( p_zipped_blob in out blob )
@@ -363,8 +428,8 @@ is
     t_comment raw(32767) := utl_raw.cast_to_raw( 'Implementation by Anton Scheffer' );
   begin
     t_offs_dir_header := dbms_lob.getlength( p_zipped_blob );
-    t_offs := dbms_lob.instr( p_zipped_blob, hextoraw( '504B0304' ), 1 );
-    while t_offs > 0
+    t_offs := 1;
+    while dbms_lob.substr( p_zipped_blob, utl_raw.length( c_LOCAL_FILE_HEADER ), t_offs ) = c_LOCAL_FILE_HEADER
     loop
       t_cnt := t_cnt + 1;
       dbms_lob.append( p_zipped_blob
@@ -373,26 +438,39 @@ is
                                      , dbms_lob.substr( p_zipped_blob, 26, t_offs + 4 )
                                      , hextoraw( '0000' )          -- File comment length
                                      , hextoraw( '0000' )          -- Disk number where file starts
-                                     , hextoraw( '0100' )          -- Internal file attributes
-                                     , hextoraw( '2000B681' )      -- External file attributes
+                                     , hextoraw( '0000' )          -- Internal file attributes => 
+                                                                   --     0000 binary file
+                                                                   --     0100 (ascii)text file
+                                     , case
+                                         when dbms_lob.substr( p_zipped_blob
+                                                             , 1
+                                                             , t_offs + 30 + blob2num( p_zipped_blob, 2, t_offs + 26 ) - 1
+                                                             ) in ( hextoraw( '2F' ) -- /
+                                                                  , hextoraw( '5C' ) -- \
+                                                                  )
+                                         then hextoraw( '10000000' ) -- a directory/folder
+                                         else hextoraw( '2000B681' ) -- a file
+                                       end                         -- External file attributes
                                      , little_endian( t_offs - 1 ) -- Relative offset of local file header
                                      , dbms_lob.substr( p_zipped_blob
-                                                      , utl_raw.cast_to_binary_integer( dbms_lob.substr( p_zipped_blob, 2, t_offs + 26 ), utl_raw.little_endian )
+                                                      , blob2num( p_zipped_blob, 2, t_offs + 26 )
                                                       , t_offs + 30
                                                       )            -- File name
                                      )
                      );
-      t_offs := dbms_lob.instr( p_zipped_blob, hextoraw( '504B0304' ), t_offs + 32 );
+      t_offs := t_offs + 30 + blob2num( p_zipped_blob, 4, t_offs + 18 )  -- compressed size
+                            + blob2num( p_zipped_blob, 2, t_offs + 26 )  -- File name length 
+                            + blob2num( p_zipped_blob, 2, t_offs + 28 ); -- Extra field length
     end loop;
     t_offs_end_header := dbms_lob.getlength( p_zipped_blob );
     dbms_lob.append( p_zipped_blob
-                   , utl_raw.concat( hextoraw( '504B0506' )                                    -- End of central directory signature
+                   , utl_raw.concat( c_END_OF_CENTAL_DIRECTORY                                 -- End of central directory signature
                                    , hextoraw( '0000' )                                        -- Number of this disk
                                    , hextoraw( '0000' )                                        -- Disk where central directory starts
                                    , little_endian( t_cnt, 2 )                                 -- Number of central directory records on this disk
                                    , little_endian( t_cnt, 2 )                                 -- Total number of central directory records
                                    , little_endian( t_offs_end_header - t_offs_dir_header )    -- Size of central directory
-                                   , little_endian( t_offs_dir_header )                        -- Relative offset of local file header
+                                   , little_endian( t_offs_dir_header )                        -- Offset of start of central directory, relative to start of archive
                                    , little_endian( nvl( utl_raw.length( t_comment ), 0 ), 2 ) -- ZIP file comment length
                                    , t_comment
                                    )
@@ -418,4 +496,3 @@ is
 --
 end;
 /
-
