@@ -7,6 +7,9 @@ is
 ** Website: http://technology.amis.nl/blog
 **
 ** Changelog:
+**   Date: 21-03-2012
+**     Take CRC32, compressed length and uncompressed length from 
+**     Central file header instead of Local file header
 **   Date: 17-02-2012
 **     Added more support for non-ascii filenames
 **   Date: 25-01-2012
@@ -115,11 +118,12 @@ end;
 */
 end;
 /
+
 CREATE OR REPLACE package body as_zip
 is
 --
-  c_LOCAL_FILE_HEADER       constant raw(4) := hextoraw( '504B0304' ); -- Local file header signature
-  c_END_OF_CENTAL_DIRECTORY constant raw(4) := hextoraw( '504B0506' ); -- End of central directory signature
+  c_LOCAL_FILE_HEADER        constant raw(4) := hextoraw( '504B0304' ); -- Local file header signature
+  c_END_OF_CENTRAL_DIRECTORY constant raw(4) := hextoraw( '504B0506' ); -- End of central directory signature
 --
   function blob2num( p_blob blob, p_len integer, p_pos integer )
   return number
@@ -135,6 +139,13 @@ is
     return coalesce( utl_i18n.raw_to_char( p_raw, p_encoding )
                    , utl_i18n.raw_to_char( p_raw, utl_i18n.map_charset( p_encoding, utl_i18n.GENERIC_CONTEXT, utl_i18n.IANA_TO_ORACLE ) )
                    );
+  end;
+--
+  function little_endian( p_big number, p_bytes pls_integer := 4 )
+  return raw
+  is
+  begin
+    return utl_raw.substr( utl_raw.cast_from_binary_integer( p_big, utl_raw.little_endian ), 1, p_bytes );
   end;
 --
   function file2blob
@@ -166,17 +177,6 @@ is
   end;
 --
   function get_file_list
-    ( p_dir varchar2
-    , p_zip_file varchar2
-    , p_encoding varchar2 := null
-    )
-  return file_list
-  is
-  begin
-    return get_file_list( file2blob( p_dir, p_zip_file ), p_encoding );
-  end;
---
-  function get_file_list
     ( p_zipped_blob blob
     , p_encoding varchar2 := null
     )
@@ -189,7 +189,7 @@ is
   begin
     t_ind := dbms_lob.getlength( p_zipped_blob ) - 21;
     loop
-      exit when t_ind < 1 or dbms_lob.substr( p_zipped_blob, 4, t_ind ) = c_END_OF_CENTAL_DIRECTORY;
+      exit when t_ind < 1 or dbms_lob.substr( p_zipped_blob, 4, t_ind ) = c_END_OF_CENTRAL_DIRECTORY;
       t_ind := t_ind - 1;
     end loop;
 --
@@ -230,16 +230,15 @@ is
     return t_rv;
   end;
 --
-  function get_file
+  function get_file_list
     ( p_dir varchar2
     , p_zip_file varchar2
-    , p_file_name varchar2
     , p_encoding varchar2 := null
     )
-  return blob
+  return file_list
   is
   begin
-    return get_file( file2blob( p_dir, p_zip_file ), p_file_name, p_encoding );
+    return get_file_list( file2blob( p_dir, p_zip_file ), p_encoding );
   end;
 --
   function get_file
@@ -254,10 +253,11 @@ is
     t_hd_ind integer;
     t_fl_ind integer;
     t_encoding varchar2(32767);
+    t_len integer;
   begin
     t_ind := dbms_lob.getlength( p_zipped_blob ) - 21;
     loop
-      exit when t_ind < 1 or dbms_lob.substr( p_zipped_blob, 4, t_ind ) = c_END_OF_CENTAL_DIRECTORY;
+      exit when t_ind < 1 or dbms_lob.substr( p_zipped_blob, 4, t_ind ) = c_END_OF_CENTRAL_DIRECTORY;
       t_ind := t_ind - 1;
     end loop;
 --
@@ -288,7 +288,8 @@ is
                          , t_encoding
                          )
       then
-        if blob2num( p_zipped_blob, 4, t_hd_ind + 24 ) = 0 -- uncompressed length
+        t_len := blob2num( p_zipped_blob, 4, t_hd_ind + 24 ); -- uncompressed length 
+        if t_len = 0
         then
           if substr( p_file_name, -1 ) in ( '/', '\' )
           then  -- directory/folder
@@ -304,14 +305,14 @@ is
           t_tmp := hextoraw( '1F8B0800000000000003' ); -- gzip header
           dbms_lob.copy( t_tmp
                        , p_zipped_blob
-                       , blob2num( p_zipped_blob, 4, t_fl_ind + 19 )
+                       ,  blob2num( p_zipped_blob, 4, t_hd_ind + 20 )
                        , 11
                        , t_fl_ind + 31
                        + blob2num( p_zipped_blob, 2, t_fl_ind + 27 ) -- File name length
                        + blob2num( p_zipped_blob, 2, t_fl_ind + 29 ) -- Extra field length
                        );
-          dbms_lob.append( t_tmp, utl_raw.concat( dbms_lob.substr( p_zipped_blob, 4, t_fl_ind + 15 ) -- CRC32
-                                                , dbms_lob.substr( p_zipped_blob, 4, t_fl_ind + 23 ) -- uncompressed length
+          dbms_lob.append( t_tmp, utl_raw.concat( dbms_lob.substr( p_zipped_blob, 4, t_hd_ind + 16 ) -- CRC32
+                                                , little_endian( t_len ) -- uncompressed length
                                                 )
                          );
           return utl_compress.lz_uncompress( t_tmp );
@@ -321,7 +322,7 @@ is
         then
           t_fl_ind := blob2num( p_zipped_blob, 4, t_hd_ind + 42 );
           return dbms_lob.substr( p_zipped_blob
-                                , blob2num( p_zipped_blob, 4, t_fl_ind + 19 )
+                                , t_len
                                 , t_fl_ind + 31
                                 + blob2num( p_zipped_blob, 2, t_fl_ind + 27 ) -- File name length
                                 + blob2num( p_zipped_blob, 2, t_fl_ind + 29 ) -- Extra field length
@@ -337,11 +338,16 @@ is
     return null;
   end;
 --
-  function little_endian( p_big number, p_bytes pls_integer := 4 )
-  return raw
+  function get_file
+    ( p_dir varchar2
+    , p_zip_file varchar2
+    , p_file_name varchar2
+    , p_encoding varchar2 := null
+    )
+  return blob
   is
   begin
-    return utl_raw.substr( utl_raw.cast_from_binary_integer( p_big, utl_raw.little_endian ), 1, p_bytes );
+    return get_file( file2blob( p_dir, p_zip_file ), p_file_name, p_encoding );
   end;
 --
   procedure add1file
@@ -464,7 +470,7 @@ is
     end loop;
     t_offs_end_header := dbms_lob.getlength( p_zipped_blob );
     dbms_lob.append( p_zipped_blob
-                   , utl_raw.concat( c_END_OF_CENTAL_DIRECTORY                                 -- End of central directory signature
+                   , utl_raw.concat( c_END_OF_CENTRAL_DIRECTORY                                -- End of central directory signature
                                    , hextoraw( '0000' )                                        -- Number of this disk
                                    , hextoraw( '0000' )                                        -- Disk where central directory starts
                                    , little_endian( t_cnt, 2 )                                 -- Number of central directory records on this disk
