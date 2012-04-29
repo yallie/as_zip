@@ -7,6 +7,8 @@ is
 ** Website: http://technology.amis.nl/blog
 **
 ** Changelog:
+**   Date: 29-04-2012
+**    fixed bug for large uncompressed files, thanks Morten Braten
 **   Date: 21-03-2012
 **     Take CRC32, compressed length and uncompressed length from 
 **     Central file header instead of Local file header
@@ -321,12 +323,16 @@ is
         if dbms_lob.substr( p_zipped_blob, 2, t_hd_ind + 10 ) = hextoraw( '0000' ) -- The file is stored (no compression)
         then
           t_fl_ind := blob2num( p_zipped_blob, 4, t_hd_ind + 42 );
-          return dbms_lob.substr( p_zipped_blob
-                                , t_len
-                                , t_fl_ind + 31
-                                + blob2num( p_zipped_blob, 2, t_fl_ind + 27 ) -- File name length
-                                + blob2num( p_zipped_blob, 2, t_fl_ind + 29 ) -- Extra field length
-                                );
+          dbms_lob.createtemporary( t_tmp, true );
+          dbms_lob.copy( t_tmp
+                       , p_zipped_blob
+                       , t_len
+                       , 1
+                       , t_fl_ind + 31
+                       + blob2num( p_zipped_blob, 2, t_fl_ind + 27 ) -- File name length
+                       + blob2num( p_zipped_blob, 2, t_fl_ind + 29 ) -- Extra field length
+                       );
+          return t_tmp;
         end if;
       end if;
       t_hd_ind := t_hd_ind + 46
