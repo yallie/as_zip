@@ -88,6 +88,7 @@ is
     t_block raw(16);
     t_len pls_integer;
     t_rv blob; 
+    t_tmp blob; 
   begin
     t_salt := dbms_crypto.randombytes( t_key_bits / 16 );
     for i in 1 .. ceil( t_key_length / 20 )
@@ -117,8 +118,11 @@ is
       dbms_lob.writeappend( t_rv, t_len, dbms_crypto.encrypt( t_block, dbms_crypto.ENCRYPT_AES256 + dbms_crypto.CHAIN_CFB + dbms_crypto.PAD_NONE, t_key, t_iv ) );
     end loop;
 --
-    t_mac := dbms_crypto.mac( dbms_lob.substr( t_rv, dbms_lob.getlength( p_src ), t_key_bits / 16 + 2 + 1 ), dbms_crypto.HMAC_SH1, utl_raw.substr( t_keys, 1 + t_key_bits / 8, t_key_bits / 8 ) ); 
+    dbms_lob.createtemporary( t_tmp, true );
+    dbms_lob.copy( t_tmp, t_rv, dbms_lob.getlength( p_src ), 1, t_key_bits / 16 + 2 + 1 );
+    t_mac := dbms_crypto.mac( t_tmp, dbms_crypto.HMAC_SH1, utl_raw.substr( t_keys, 1 + t_key_bits / 8, t_key_bits / 8 ) ); 
     dbms_lob.writeappend( t_rv, 10, t_mac );
+    dbms_lob.freetemporary( t_tmp );
     return t_rv; 
   end;
 --
