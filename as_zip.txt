@@ -10,14 +10,15 @@ is
 **   Date: 29-04-2012
 **    fixed bug for large uncompressed files, thanks Morten Braten
 **   Date: 21-03-2012
-**     Take CRC32, compressed length and uncompressed length from 
+**     Take CRC32, compressed length and uncompressed length from
 **     Central file header instead of Local file header
 **   Date: 17-02-2012
 **     Added more support for non-ascii filenames
 **   Date: 25-01-2012
 **     Added MIT-license
 **     Some minor improvements
-**
+**   Date: 31-01-2014
+**     file limit increased to 4GB
 ******************************************************************************
 ******************************************************************************
 Copyright (C) 2010,2011 by Anton Scheffer
@@ -130,8 +131,14 @@ is
   function blob2num( p_blob blob, p_len integer, p_pos integer )
   return number
   is
+    rv number;
   begin
-    return utl_raw.cast_to_binary_integer( dbms_lob.substr( p_blob, p_len, p_pos ), utl_raw.little_endian );
+    rv := utl_raw.cast_to_binary_integer( dbms_lob.substr( p_blob, p_len, p_pos ), utl_raw.little_endian );
+    if rv < 0
+    then
+      rv := rv + 4294967296;
+    end if;
+    return rv;
   end;
 --
   function raw2varchar2( p_raw raw, p_encoding varchar2 )
@@ -146,8 +153,13 @@ is
   function little_endian( p_big number, p_bytes pls_integer := 4 )
   return raw
   is
+    t_big number := p_big;
   begin
-    return utl_raw.substr( utl_raw.cast_from_binary_integer( p_big, utl_raw.little_endian ), 1, p_bytes );
+    if t_big > 2147483647
+    then
+      t_big := t_big - 4294967296;
+    end if;
+    return utl_raw.substr( utl_raw.cast_from_binary_integer( t_big, utl_raw.little_endian ), 1, p_bytes );
   end;
 --
   function file2blob
@@ -208,7 +220,7 @@ is
       if p_encoding is null
       then
         if utl_raw.bit_and( dbms_lob.substr( p_zipped_blob, 1, t_hd_ind + 9 ), hextoraw( '08' ) ) = hextoraw( '08' )
-        then  
+        then
           t_encoding := 'AL32UTF8'; -- utf8
         else
           t_encoding := 'US8PC437'; -- IBM codepage 437
@@ -274,7 +286,7 @@ is
       if p_encoding is null
       then
         if utl_raw.bit_and( dbms_lob.substr( p_zipped_blob, 1, t_hd_ind + 9 ), hextoraw( '08' ) ) = hextoraw( '08' )
-        then  
+        then
           t_encoding := 'AL32UTF8'; -- utf8
         else
           t_encoding := 'US8PC437'; -- IBM codepage 437
@@ -290,7 +302,7 @@ is
                          , t_encoding
                          )
       then
-        t_len := blob2num( p_zipped_blob, 4, t_hd_ind + 24 ); -- uncompressed length 
+        t_len := blob2num( p_zipped_blob, 4, t_hd_ind + 24 ); -- uncompressed length
         if t_len = 0
         then
           if substr( p_file_name, -1 ) in ( '/', '\' )
@@ -373,14 +385,14 @@ is
     t_now := sysdate;
     t_len := nvl( dbms_lob.getlength( p_content ), 0 );
     if t_len > 0
-    then 
+    then
       t_blob := utl_compress.lz_compress( p_content );
       t_clen := dbms_lob.getlength( t_blob ) - 18;
       t_compressed := t_clen < t_len;
-      t_crc32 := dbms_lob.substr( t_blob, 4, t_clen + 11 );       
+      t_crc32 := dbms_lob.substr( t_blob, 4, t_clen + 11 );
     end if;
     if not t_compressed
-    then 
+    then
       t_clen := t_len;
       t_blob := p_content;
     end if;
@@ -395,7 +407,7 @@ is
                                    , case when t_name = utl_i18n.string_to_raw( p_name, 'US8PC437' )
                                        then hextoraw( '0000' ) -- no General purpose bits
                                        else hextoraw( '0008' ) -- set Language encoding flag (EFS)
-                                     end 
+                                     end
                                    , case when t_compressed
                                         then hextoraw( '0800' ) -- deflate
                                         else hextoraw( '0000' ) -- stored
@@ -419,14 +431,14 @@ is
                                    )
                    );
     if t_compressed
-    then                   
+    then
       dbms_lob.copy( p_zipped_blob, t_blob, t_clen, dbms_lob.getlength( p_zipped_blob ) + 1, 11 ); -- compressed content
     elsif t_clen > 0
-    then                   
+    then
       dbms_lob.copy( p_zipped_blob, t_blob, t_clen, dbms_lob.getlength( p_zipped_blob ) + 1, 1 ); --  content
     end if;
     if dbms_lob.istemporary( t_blob ) = 1
-    then      
+    then
       dbms_lob.freetemporary( t_blob );
     end if;
   end;
@@ -450,7 +462,7 @@ is
                                      , dbms_lob.substr( p_zipped_blob, 26, t_offs + 4 )
                                      , hextoraw( '0000' )          -- File comment length
                                      , hextoraw( '0000' )          -- Disk number where file starts
-                                     , hextoraw( '0000' )          -- Internal file attributes => 
+                                     , hextoraw( '0000' )          -- Internal file attributes =>
                                                                    --     0000 binary file
                                                                    --     0100 (ascii)text file
                                      , case
@@ -471,7 +483,7 @@ is
                                      )
                      );
       t_offs := t_offs + 30 + blob2num( p_zipped_blob, 4, t_offs + 18 )  -- compressed size
-                            + blob2num( p_zipped_blob, 2, t_offs + 26 )  -- File name length 
+                            + blob2num( p_zipped_blob, 2, t_offs + 26 )  -- File name length
                             + blob2num( p_zipped_blob, 2, t_offs + 28 ); -- Extra field length
     end loop;
     t_offs_end_header := dbms_lob.getlength( p_zipped_blob );
