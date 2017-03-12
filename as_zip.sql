@@ -48,6 +48,9 @@ THE SOFTWARE.
 ******************************************************************************
 ******************************************** */
   type file_list is table of clob;
+  g_size_limit integer := power(2, 32);
+  g_size_limit_sqlcode integer := -20200;
+  g_size_limit_message varchar2(200) := 'Maximum file size of 4GB exceeded';
 --
   function file2blob
     ( p_dir varchar2
@@ -389,7 +392,6 @@ is
     t_crc32 raw(4) := hextoraw( '00000000' );
     t_compressed boolean := false;
     t_name raw(32767);
-    t_size_limit integer := power(2, 32);
   begin
     t_now := cast(nvl(p_date, sysdate) as timestamp with local time zone) at time zone 'UTC';
     t_len := nvl( dbms_lob.getlength( p_content ), 0 );
@@ -450,6 +452,9 @@ is
     then
       dbms_lob.freetemporary( t_blob );
     end if;
+    if g_size_limit < dbms_lob.getlength( p_zipped_blob ) then
+    	raise_application_error (g_size_limit_sqlcode, g_size_limit_message || ' in as_zip.add1file');
+    end if;
   end;
 --
   procedure finish_zip( p_zipped_blob in out nocopy blob )
@@ -458,7 +463,7 @@ is
     t_offs integer;
     t_offs_dir_header integer;
     t_offs_end_header integer;
-    t_comment raw(32767) := utl_raw.cast_to_raw( 'Implementation by Anton Scheffer' );
+    t_comment raw(32767) := utl_raw.cast_to_raw( 'Implementation by Anton Scheffer, improved by Dirk Strack' );
   begin
     t_offs_dir_header := dbms_lob.getlength( p_zipped_blob );
     t_offs := 1;
@@ -508,6 +513,9 @@ is
                                    , t_comment
                                    )
                    );
+    if g_size_limit < dbms_lob.getlength( p_zipped_blob ) then
+    	raise_application_error (g_size_limit_sqlcode, g_size_limit_message || ' in as_zip.finish_zip');
+    end if;
   end;
 --
   procedure save_zip
