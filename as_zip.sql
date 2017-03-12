@@ -7,6 +7,12 @@ is
 ** Website: http://technology.amis.nl/blog
 **
 ** Changelog:
+**   Date: 04-08-2016
+**     fixed endless loop for empty/null zip file
+**   Date: 28-07-2016
+**     added support for defate64 (this only works for zip-files created with 7Zip)
+**   Date: 31-01-2014
+**     file limit increased to 4GB
 **   Date: 29-04-2012
 **    fixed bug for large uncompressed files, thanks Morten Braten
 **   Date: 21-03-2012
@@ -17,8 +23,6 @@ is
 **   Date: 25-01-2012
 **     Added MIT-license
 **     Some minor improvements
-**   Date: 31-01-2014
-**     file limit increased to 4GB
 ******************************************************************************
 ******************************************************************************
 Copyright (C) 2010,2011 by Anton Scheffer
@@ -44,6 +48,9 @@ THE SOFTWARE.
 ******************************************************************************
 ******************************************** */
   type file_list is table of clob;
+  g_size_limit integer := power(2, 32);
+  g_size_limit_sqlcode integer := -20200;
+  g_size_limit_message varchar2(200) := 'Maximum file size of 4GB exceeded';
 --
   function file2blob
     ( p_dir varchar2
@@ -80,12 +87,13 @@ THE SOFTWARE.
   return blob;
 --
   procedure add1file
-    ( p_zipped_blob in out blob
+    ( p_zipped_blob in out nocopy blob
     , p_name varchar2
     , p_content blob
+	, p_date date default sysdate
     );
 --
-  procedure finish_zip( p_zipped_blob in out blob );
+  procedure finish_zip( p_zipped_blob in out nocopy blob );
 --
   procedure save_zip
     ( p_zipped_blob blob
@@ -201,7 +209,7 @@ is
     t_rv file_list;
     t_encoding varchar2(32767);
   begin
-    t_ind := dbms_lob.getlength( p_zipped_blob ) - 21;
+    t_ind := nvl( dbms_lob.getlength( p_zipped_blob ), 0 ) - 21;
     loop
       exit when t_ind < 1 or dbms_lob.substr( p_zipped_blob, 4, t_ind ) = c_END_OF_CENTRAL_DIRECTORY;
       t_ind := t_ind - 1;
@@ -269,7 +277,7 @@ is
     t_encoding varchar2(32767);
     t_len integer;
   begin
-    t_ind := dbms_lob.getlength( p_zipped_blob ) - 21;
+    t_ind := nvl( dbms_lob.getlength( p_zipped_blob ), 0 ) - 21;
     loop
       exit when t_ind < 1 or dbms_lob.substr( p_zipped_blob, 4, t_ind ) = c_END_OF_CENTRAL_DIRECTORY;
       t_ind := t_ind - 1;
@@ -313,7 +321,9 @@ is
           end if;
         end if;
 --
-        if dbms_lob.substr( p_zipped_blob, 2, t_hd_ind + 10 ) = hextoraw( '0800' ) -- deflate
+        if dbms_lob.substr( p_zipped_blob, 2, t_hd_ind + 10 ) in ( hextoraw( '0800' ) -- deflate
+                                                                 , hextoraw( '0900' ) -- deflate64
+                                                                 )
         then
           t_fl_ind := blob2num( p_zipped_blob, 4, t_hd_ind + 42 );
           t_tmp := hextoraw( '1F8B0800000000000003' ); -- gzip header
@@ -369,12 +379,13 @@ is
   end;
 --
   procedure add1file
-    ( p_zipped_blob in out blob
+    ( p_zipped_blob in out nocopy blob
     , p_name varchar2
     , p_content blob
+	, p_date date default sysdate
     )
   is
-    t_now date;
+    t_now timestamp with time zone;
     t_blob blob;
     t_len integer;
     t_clen integer;
@@ -382,7 +393,7 @@ is
     t_compressed boolean := false;
     t_name raw(32767);
   begin
-    t_now := sysdate;
+    t_now := cast(nvl(p_date, sysdate) as timestamp with local time zone) at time zone 'UTC';
     t_len := nvl( dbms_lob.getlength( p_content ), 0 );
     if t_len > 0
     then
@@ -400,7 +411,7 @@ is
     then
       dbms_lob.createtemporary( p_zipped_blob, true );
     end if;
-    t_name := utl_i18n.string_to_raw( p_name, 'AL32UTF8' );
+    t_name := utl_i18n.string_to_raw( compose(p_name), 'AL32UTF8' );
     dbms_lob.append( p_zipped_blob
                    , utl_raw.concat( c_LOCAL_FILE_HEADER -- Local file header signature
                                    , hextoraw( '1400' )  -- version 2.0
@@ -419,7 +430,7 @@ is
                                                   ) -- File last modification time
                                    , little_endian( to_number( to_char( t_now, 'dd' ) )
                                                   + to_number( to_char( t_now, 'mm' ) ) * 32
-                                                  + ( to_number( to_char( t_now, 'yyyy' ) ) - 1980 ) * 512
+                                                  + ( greatest(to_number( to_char( t_now, 'yyyy' ) ) - 1980, 0) ) * 512
                                                   , 2
                                                   ) -- File last modification date
                                    , t_crc32 -- CRC-32
@@ -441,15 +452,18 @@ is
     then
       dbms_lob.freetemporary( t_blob );
     end if;
+    if g_size_limit < dbms_lob.getlength( p_zipped_blob ) then
+    	raise_application_error (g_size_limit_sqlcode, g_size_limit_message || ' in as_zip.add1file');
+    end if;
   end;
 --
-  procedure finish_zip( p_zipped_blob in out blob )
+  procedure finish_zip( p_zipped_blob in out nocopy blob )
   is
     t_cnt pls_integer := 0;
     t_offs integer;
     t_offs_dir_header integer;
     t_offs_end_header integer;
-    t_comment raw(32767) := utl_raw.cast_to_raw( 'Implementation by Anton Scheffer' );
+    t_comment raw(32767) := utl_raw.cast_to_raw( 'Implementation by Anton Scheffer, improved by Dirk Strack' );
   begin
     t_offs_dir_header := dbms_lob.getlength( p_zipped_blob );
     t_offs := 1;
@@ -499,6 +513,9 @@ is
                                    , t_comment
                                    )
                    );
+    if g_size_limit < dbms_lob.getlength( p_zipped_blob ) then
+    	raise_application_error (g_size_limit_sqlcode, g_size_limit_message || ' in as_zip.finish_zip');
+    end if;
   end;
 --
   procedure save_zip
