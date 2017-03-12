@@ -87,6 +87,7 @@ THE SOFTWARE.
     ( p_zipped_blob in out nocopy blob
     , p_name varchar2
     , p_content blob
+	, p_date date default sysdate
     );
 --
   procedure finish_zip( p_zipped_blob in out nocopy blob );
@@ -378,17 +379,19 @@ is
     ( p_zipped_blob in out nocopy blob
     , p_name varchar2
     , p_content blob
+	, p_date date default sysdate
     )
   is
-    t_now date;
+    t_now timestamp with time zone;
     t_blob blob;
     t_len integer;
     t_clen integer;
     t_crc32 raw(4) := hextoraw( '00000000' );
     t_compressed boolean := false;
     t_name raw(32767);
+    t_size_limit integer := power(2, 32);
   begin
-    t_now := sysdate;
+    t_now := cast(nvl(p_date, sysdate) as timestamp with local time zone) at time zone 'UTC';
     t_len := nvl( dbms_lob.getlength( p_content ), 0 );
     if t_len > 0
     then
@@ -406,7 +409,7 @@ is
     then
       dbms_lob.createtemporary( p_zipped_blob, true );
     end if;
-    t_name := utl_i18n.string_to_raw( p_name, 'AL32UTF8' );
+    t_name := utl_i18n.string_to_raw( compose(p_name), 'AL32UTF8' );
     dbms_lob.append( p_zipped_blob
                    , utl_raw.concat( c_LOCAL_FILE_HEADER -- Local file header signature
                                    , hextoraw( '1400' )  -- version 2.0
@@ -425,7 +428,7 @@ is
                                                   ) -- File last modification time
                                    , little_endian( to_number( to_char( t_now, 'dd' ) )
                                                   + to_number( to_char( t_now, 'mm' ) ) * 32
-                                                  + ( to_number( to_char( t_now, 'yyyy' ) ) - 1980 ) * 512
+                                                  + ( greatest(to_number( to_char( t_now, 'yyyy' ) ) - 1980, 0) ) * 512
                                                   , 2
                                                   ) -- File last modification date
                                    , t_crc32 -- CRC-32
