@@ -84,12 +84,12 @@ THE SOFTWARE.
   return blob;
 --
   procedure add1file
-    ( p_zipped_blob in out blob
+    ( p_zipped_blob in out nocopy blob
     , p_name varchar2
     , p_content blob
     );
 --
-  procedure finish_zip( p_zipped_blob in out blob );
+  procedure finish_zip( p_zipped_blob in out nocopy blob );
 --
   procedure save_zip
     ( p_zipped_blob blob
@@ -375,7 +375,7 @@ is
   end;
 --
   procedure add1file
-    ( p_zipped_blob in out blob
+    ( p_zipped_blob in out nocopy blob
     , p_name varchar2
     , p_content blob
     )
@@ -449,7 +449,7 @@ is
     end if;
   end;
 --
-  procedure finish_zip( p_zipped_blob in out blob )
+  procedure finish_zip( p_zipped_blob in out nocopy blob )
   is
     t_cnt pls_integer := 0;
     t_offs integer;
