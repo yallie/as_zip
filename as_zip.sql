@@ -7,6 +7,12 @@ is
 ** Website: http://technology.amis.nl/blog
 **
 ** Changelog:
+**   Date: 04-08-2016
+**     fixed endless loop for empty/null zip file
+**   Date: 28-07-2016
+**     added support for defate64 (this only works for zip-files created with 7Zip)
+**   Date: 31-01-2014
+**     file limit increased to 4GB
 **   Date: 29-04-2012
 **    fixed bug for large uncompressed files, thanks Morten Braten
 **   Date: 21-03-2012
@@ -17,8 +23,6 @@ is
 **   Date: 25-01-2012
 **     Added MIT-license
 **     Some minor improvements
-**   Date: 31-01-2014
-**     file limit increased to 4GB
 ******************************************************************************
 ******************************************************************************
 Copyright (C) 2010,2011 by Anton Scheffer
@@ -201,7 +205,7 @@ is
     t_rv file_list;
     t_encoding varchar2(32767);
   begin
-    t_ind := dbms_lob.getlength( p_zipped_blob ) - 21;
+    t_ind := nvl( dbms_lob.getlength( p_zipped_blob ), 0 ) - 21;
     loop
       exit when t_ind < 1 or dbms_lob.substr( p_zipped_blob, 4, t_ind ) = c_END_OF_CENTRAL_DIRECTORY;
       t_ind := t_ind - 1;
@@ -269,7 +273,7 @@ is
     t_encoding varchar2(32767);
     t_len integer;
   begin
-    t_ind := dbms_lob.getlength( p_zipped_blob ) - 21;
+    t_ind := nvl( dbms_lob.getlength( p_zipped_blob ), 0 ) - 21;
     loop
       exit when t_ind < 1 or dbms_lob.substr( p_zipped_blob, 4, t_ind ) = c_END_OF_CENTRAL_DIRECTORY;
       t_ind := t_ind - 1;
@@ -313,7 +317,9 @@ is
           end if;
         end if;
 --
-        if dbms_lob.substr( p_zipped_blob, 2, t_hd_ind + 10 ) = hextoraw( '0800' ) -- deflate
+        if dbms_lob.substr( p_zipped_blob, 2, t_hd_ind + 10 ) in ( hextoraw( '0800' ) -- deflate
+                                                                 , hextoraw( '0900' ) -- deflate64
+                                                                 )
         then
           t_fl_ind := blob2num( p_zipped_blob, 4, t_hd_ind + 42 );
           t_tmp := hextoraw( '1F8B0800000000000003' ); -- gzip header
